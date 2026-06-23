@@ -26,6 +26,23 @@ def onboard(repo_path: str) -> dict:
 
 
 @mcp.tool()
+def search_code(query: str, limit: int = 10) -> list:
+    """Find functions by meaning or keyword when you don't know the exact name.
+    Searches across function names, docstrings, and source bodies using full-text search.
+    Use this first to locate code from a plain-English description — e.g. 'validate auth token',
+    'add two numbers', 'parse file path'. Returns id, name, file, line, and a short snippet."""
+    return services.search_code(query, limit)
+
+
+@mcp.tool()
+def get_function_source(function_id: str) -> dict:
+    """Read a function's full source code to confirm it's the right one.
+    Call this after search_code returns candidates — pass the id field from a search result
+    to get the complete body, file path, and line number before making any edits."""
+    return services.get_function_source(function_id)
+
+
+@mcp.tool()
 def who_calls(name: str) -> list:
     """Find functions that DIRECTLY call the given function — its immediate callers."""
     return services.who_calls(name)

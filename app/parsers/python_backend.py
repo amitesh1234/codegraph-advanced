@@ -26,6 +26,8 @@ class PythonBackend(LanguageBackend):
                     "file": rel_path,
                     "line": node.lineno,
                     "language": "python",
+                    "body": ast.get_source_segment(source, node) or "",
+                    "docstring": ast.get_docstring(node) or "",
                 })
                 self.stack.append(fid)
                 self.generic_visit(node)

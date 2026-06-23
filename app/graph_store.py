@@ -31,7 +31,8 @@ def index_repo(repo_path):
         """
         UNWIND $rows AS row
         MERGE (f:Function {id: row.id})
-        SET f.name = row.name, f.file = row.file, f.line = row.line
+        SET f.name = row.name, f.file = row.file, f.line = row.line,
+            f.body = row.body, f.docstring = row.docstring
         """,
         {"rows": functions},
     )

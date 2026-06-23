@@ -1,9 +1,25 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from app.db import run_query
 from app.memory import log_run
 from app import services
 
 router = APIRouter(prefix="/query", tags=["queries"])
+
+@router.get("/search")
+def search(query: str, limit: int = 10):
+    rows = services.search_code(query, limit)
+    log_run("search", target=query, result_count=len(rows))
+    return {"query": query, "results": rows}
+
+
+@router.get("/source")
+def source(function_id: str):
+    row = services.get_function_source(function_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Function not found")
+    log_run("source", target=function_id, result_count=1)
+    return row
+
 
 @router.get("/who-calls")
 def who_calls(name: str):

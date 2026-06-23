@@ -39,6 +39,29 @@ class JsBackend(LanguageBackend):
                 return k.text.decode("utf8", "ignore")
         return None
 
+    def _statement_node(self, node):
+        """Walk up from arrow/function-expression to its statement-level ancestor."""
+        if node.type in ("arrow_function", "function_expression"):
+            p = node.parent
+            if p and p.type == "variable_declarator":
+                pp = p.parent
+                if pp and pp.type in ("variable_declaration", "lexical_declaration"):
+                    return pp
+        return node
+
+    def _leading_comment(self, node):
+        """Return the text of the immediately preceding // or /* */ comment, or ''."""
+        stmt = self._statement_node(node)
+        prev = stmt.prev_named_sibling
+        if prev and prev.type == "comment":
+            text = prev.text.decode("utf8", "ignore").strip()
+            if text.startswith("//"):
+                return text[2:].strip()
+            if text.startswith("/*") and text.endswith("*/"):
+                return text[2:-2].strip()
+            return text
+        return ""
+
     def extract(self, source: str, rel_path: str):
         tree = self.parser.parse(bytes(source, "utf8"))
         functions, raw_calls = [], []
@@ -56,6 +79,8 @@ class JsBackend(LanguageBackend):
                         "file": rel_path,
                         "line": node.start_point[0] + 1,  # 0-indexed -> 1-indexed
                         "language": "js",
+                        "body": node.text.decode("utf8", "ignore"),
+                        "docstring": self._leading_comment(node),
                     })
                     func_stack.append(fid)
                     pushed = True

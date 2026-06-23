@@ -1,94 +1,92 @@
-# CodeGraph — Codebase Q&A & Impact Map
+# CodeGraph — AI-Native Code Intelligence
 
-> Build a queryable **code graph** of any Python repository and answer the two questions engineers actually fear before touching unfamiliar code:
-> **"Who calls this function?"** and **"What breaks if I change it?"**
+> Give an AI the ability to **navigate an unfamiliar codebase like a senior engineer** — locate the right function from a plain-English intent, read it, and map the blast radius of changing it.
 
-CodeGraph parses a repository into a graph of functions and their call relationships, stores it in **Neo4j**, and exposes it through a clean **FastAPI** service. Unlike search- or embedding-based tools, it answers *structural* questions — because dependencies are **connections**, not text similarities.
+CodeGraph parses a repository (Python, JavaScript, TypeScript) into a **code graph** of functions and their call relationships, stores it in **Neo4j**, and exposes it to AI assistants through an **MCP server** (plus a REST API). An LLM can then answer the questions engineers actually fear before touching code: *where is this handled, what calls it, and what breaks if I change it* — autonomously, by chaining the tools.
+
+Unlike pure embedding/RAG tools, it answers **structural** questions — because dependencies are *connections*, not text similarities.
 
 ![Full call graph](docs/images/call-graph-full.png)
 *The full call graph of `psf/requests` — every function and `CALLS` relationship.*
 
 ---
 
-## Why this exists
+## What makes this different
 
-AI coding tools are great at "what does this code *mean*." They're weak at the structural question that decides whether a change is safe: **blast radius.** Before you modify a function in a large or unfamiliar codebase, you need to know everything that transitively depends on it.
+Most "chat with your codebase" tools do semantic search and stop there — they can tell you *what code means*, not *what depends on it*. CodeGraph pairs two complementary retrieval modes:
 
-CodeGraph answers that directly by modeling the codebase as a graph and traversing real call relationships — so "what does changing `send` affect?" is a single graph query, not a guess.
+- **Findability** (`search_code`) — locate functions by intent, even without knowing names.
+- **Structural traversal** (`impact_of_change`, `depends_on`, `who_calls`) — follow real call edges to compute the exact blast radius of a change.
+
+Together they let an AI go from *"add retry logic to the request flow"* → the right function → everything that would break — which is the foundation for **minimal, scoped, traceable edits** instead of the sprawling changes AI coding agents are notorious for.
 
 ---
 
-## Demo — analyzing `psf/requests`
+## The headline: an AI using CodeGraph through MCP
+
+Connected as an MCP server in Claude Desktop, the assistant chains the tools on its own. A real, unedited example against `psf/requests`:
+
+> **Prompt:** *"Find where the library prepares a request, read that function, and tell me what would break if I change it."*
+
+The AI autonomously:
+1. called `search_code("prepare request")` → located `PreparedRequest.prepare` (`src/requests/models.py:424`),
+2. called `get_function_source(...)` → read the function and recognized it as an orchestrator of seven ordered sub-steps,
+3. called `impact_of_change` / `depends_on` → traced the blast radius up through `Session.prepare_request → Session.request → the public API`, concluding **every request in the library flows through this function**,
+4. and produced senior-level guidance: *adding an optional keyword arg is safe; reordering the sub-steps or changing the signature/return contract is dangerous* — because the ordering encodes load-bearing auth/hook dependencies.
+
+No function names were given by the user. The AI located, read, and reasoned about impact entirely through CodeGraph's tools.
+
+![AI chaining CodeGraph tools in Claude Desktop](docs/images/mcp-demo.gif)
+
+---
+
+## Capabilities
+
+| Tool (MCP) / Route (REST) | Purpose |
+|---|---|
+| `onboard` · `POST /onboard` | Index a repo (local path or public git URL) into the graph |
+| `search_code` · `GET /query/search` | **Find functions by meaning/keyword** — full-text over name, docstring, and body |
+| `get_function_source` · `GET /query/source` | Read a function's full source to confirm it's the right one |
+| `who_calls` · `GET /query/who-calls` | Direct callers of a function |
+| `impact_of_change` · `GET /query/impact` | Everything that **transitively calls** it — the blast radius |
+| `depends_on` · `GET /query/depends-on` | Everything it transitively calls, with `hop` distance |
+| `GET /memory/history` | Log of past onboards and queries |
+
+Every query is exposed through **both** an MCP tool (for AI assistants) and a REST route (for humans / scripts), sharing a single service layer — no duplicated logic. Interactive API docs at **`/docs`**.
+
+---
+
+## Demo data — `psf/requests`
 
 Onboarded straight from a GitHub URL:
 
 ```json
-POST /onboard
-{ "repo_path": "https://github.com/psf/requests" }
-
-→ {
-  "repo": "https://github.com/psf/requests",
-  "functions_indexed": 711,
-  "call_edges_indexed": 1548
-}
+POST /onboard  { "repo_path": "https://github.com/psf/requests" }
+→ { "functions_indexed": 711, "call_edges_indexed": 1548 }
 ```
 
-A focused view of the graph (readable subgraph):
+**Find by intent** (`search_code` — note: query words don't have to match names):
+```
+"combines or merges settings"  →  merge_setting, merge_environment_settings,
+                                   merge_hooks, merge_cookies
+```
+
+**Trace impact** (`impact_of_change`):
+```
+GET /query/impact?name=send&depth=3
+→ { "target": "send", "depth": 3, "impacted_by_change": [
+     { "name": "handle_401", "file": "src/requests/auth.py" }, ... ] }
+```
+
+**Trace dependencies with hop distance** (`depends_on`):
+```
+GET /query/depends-on?name=request&depth=3
+→ { "depends_on": [
+     { "name": "prepare_request", "file": "src/requests/sessions.py", "hop": 1 }, ... ] }
+```
 
 ![Focused call graph](docs/images/call-graph-focused.png)
 *Zoomed in: a cluster of functions and their `CALLS` edges.*
-
-### Who calls a function?
-
-```
-GET /query/who-calls?name=request
-```
-```json
-{
-  "target": "request",
-  "callers": [
-    { "name": "get",   "file": "src/requests/api.py" },
-    { "name": "post",  "file": "src/requests/api.py" },
-    { "name": "head",  "file": "src/requests/sessions.py" },
-    { "name": "patch", "file": "src/requests/sessions.py" }
-  ]
-}
-```
-
-### What breaks if I change it? (transitive impact)
-
-```
-GET /query/impact?name=send&depth=3
-```
-```json
-{
-  "target": "send",
-  "depth": 3,
-  "impacted_by_change": [
-    { "name": "handle_401",       "file": "src/requests/auth.py" },
-    { "name": "response_handler", "file": "tests/test_requests.py" }
-  ]
-}
-```
-
-### What does it depend on? (transitive, with hop distance)
-
-```
-GET /query/depends-on?name=request&depth=3
-```
-```json
-{
-  "target": "request",
-  "depth": 3,
-  "depends_on": [
-    { "name": "merge_environment_settings", "file": "src/requests/sessions.py", "hop": 1 },
-    { "name": "prepare_request",            "file": "src/requests/sessions.py", "hop": 1 },
-    { "name": "send",                       "file": "src/requests/adapters.py", "hop": 1 }
-  ]
-}
-```
-
-`hop` is the shortest call-distance from the target — closer dependencies are higher-risk.
 
 ---
 
@@ -96,43 +94,33 @@ GET /query/depends-on?name=request&depth=3
 
 ```mermaid
 flowchart LR
-    A["Git URL or local path"] --> B["AST parser (Python ast)"]
-    B --> C["Functions + CALLS edges"]
+    A["Git URL or local path"] --> B["Pluggable parsers<br/>(Python ast - JS/TS tree-sitter)"]
+    B --> C["Functions + CALLS edges<br/>+ source + docstrings"]
     C --> D[("Neo4j code graph")]
-    D --> E["Cypher traversals"]
-    E --> F["FastAPI service"]
-    F --> G["/query: who-calls · impact · depends-on"]
-    F --> H[("SQLite analysis history")]
+    D --> E1["Cypher traversals"]
+    D --> E2["Neo4j full-text index"]
+    E1 --> F["Service layer"]
+    E2 --> F
+    F --> G["MCP server (AI assistants)"]
+    F --> H["REST API (humans / scripts)"]
 ```
 
-1. **Parse** — Python's built-in `ast` walks every `.py` file, extracting function definitions and the calls inside them.
-2. **Resolve** — call names are matched to function definitions to produce `CALLS` edges; each function gets a stable id (`path::name`).
-3. **Store** — functions and edges are written into **Neo4j** with idempotent `MERGE` (re-onboarding updates rather than duplicates).
-4. **Query** — `who-calls` / `impact` / `depends-on` are Cypher traversals; impact and depends-on use variable-length paths (`[:CALLS*1..N]`) for transitive reach.
-5. **Remember** — every onboard and query is logged with a timestamp to a **SQLite** analysis history, queryable at `/memory/history`.
+1. **Parse** — a pluggable `LanguageBackend` per language: Python via the built-in `ast`, JavaScript/TypeScript/TSX via tree-sitter. Each extracts function definitions, the calls inside them, and the function's source + docstring.
+2. **Resolve** — call names are matched to definitions to produce `CALLS` edges; each function gets a stable id (`path::name`).
+3. **Store** — functions and edges written to **Neo4j** with idempotent `MERGE`; a **full-text index** over name/docstring/body powers `search_code`.
+4. **Traverse** — `impact` / `depends-on` use variable-length Cypher paths (`[:CALLS*1..N]`) for transitive reach with `hop` distance.
+5. **Expose** — one **service layer** is the single source of truth; thin **MCP** and **REST** adapters call it.
 
----
-
-## API reference
-
-| Method | Route | Purpose |
-|--------|-------|---------|
-| `POST` | `/onboard` | Index a repo (local path **or** public git URL) into the graph |
-| `GET`  | `/query/who-calls?name=` | Direct callers of a function |
-| `GET`  | `/query/impact?name=&depth=` | Everything that transitively calls it ("what breaks") |
-| `GET`  | `/query/depends-on?name=&depth=` | Everything it transitively calls, with hop distance |
-| `GET`  | `/memory/history?limit=` | Log of past onboards and queries |
-| `GET`  | `/health` | Liveness check |
-
-Interactive docs (Swagger UI) are auto-generated at **`/docs`**.
+The pluggable parser interface means adding a language is one small backend class — TypeScript/TSX, for example, inherit the JS backend and only swap the grammar.
 
 ---
 
 ## Tech stack
 
-- **Python** + **FastAPI** — the service and clean route layer
-- **Neo4j** — persistent code graph, queried with Cypher
-- **Python `ast`** — zero-dependency parsing (multi-language via tree-sitter is on the roadmap)
+- **Python** + **FastAPI** — service and REST layer
+- **MCP (Model Context Protocol)** — exposes the graph as tools any AI assistant can call
+- **Neo4j** — persistent code graph (Cypher traversals) + full-text search index
+- **tree-sitter** (JS/TS/TSX) + **`ast`** (Python) — multi-language parsing behind a pluggable interface
 - **SQLite** — analysis-history memory
 - **Docker / docker-compose** — one-command Neo4j + API stack
 
@@ -140,73 +128,63 @@ Interactive docs (Swagger UI) are auto-generated at **`/docs`**.
 
 ## Quick start
 
-> Prerequisites: Docker, Python 3.12+, and `git`.
+> Prerequisites: Docker, Python 3.12+, `git`.
 
 ```bash
-# 1. Clone
-git clone https://github.com/amitesh1234/codegraph-basic.git
-cd codegraph-basic
+git clone https://github.com/amitesh1234/codegraph-advanced.git
+cd codegraph-advanced
 
-# 2. Start Neo4j (Browser at http://localhost:7474, user: neo4j / pass: password)
+# Start Neo4j (Browser: http://localhost:7474 — neo4j / password)
 docker compose up -d neo4j
 
-# 3. Run the API
+# Run the API
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload      # docs at http://localhost:8000/docs
 
-# 4. Open the docs and onboard a repo
-#    http://localhost:8000/docs
+# Onboard a repo
 curl -X POST http://localhost:8000/onboard \
   -H "Content-Type: application/json" \
   -d '{"repo_path": "https://github.com/psf/requests"}'
 ```
 
+### Connect to Claude Desktop (MCP)
+
+Add to `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "/abs/path/to/codegraph-advanced/.venv/bin/python",
+      "args": ["app/mcp_server.py"],
+      "cwd": "/abs/path/to/codegraph-advanced"
+    }
+  }
+}
+```
+Restart Claude Desktop, then ask: *"Using codegraph, find where requests are prepared and tell me what would break if I change it."*
+
 See **[DEPLOYMENT.md](DEPLOYMENT.md)** for the full-Docker stack and cloud (Neo4j AuraDB) deployment.
-
----
-
-## Project structure
-
-```
-codegraph-basic/
-├── docker-compose.yml      # Neo4j + API services
-├── Dockerfile              # API image
-├── requirements.txt
-├── app/
-│   ├── main.py             # FastAPI app + lifespan + routers
-│   ├── db.py               # Neo4j connection + run_query helper
-│   ├── parser.py           # AST → functions + call edges
-│   ├── graph_store.py      # write graph into Neo4j (MERGE/UNWIND)
-│   ├── memory.py           # SQLite analysis history
-│   └── routers/
-│       ├── onboarding.py   # POST /onboard
-│       ├── queries.py      # GET /query/...
-│       └── memory.py       # GET /memory/history
-└── DEPLOYMENT.md
-```
 
 ---
 
 ## Known limitations
 
-This is a **static, best-effort** call graph — honest about what it does and doesn't capture:
+A **static, best-effort** call graph — honest about what it captures:
 
-- **Name-based resolution.** Calls are matched by function name, so a call to `send` links to *every* `send` in the repo (e.g. both `src/requests/adapters.py` and `tests/test_requests.py`). It does not resolve types or imports to pick the exact target.
-- **Dynamic dispatch isn't captured** — reflection, `getattr`, and runtime-resolved calls are invisible to static analysis (this is formally undecidable in general).
-- **Python only** for now.
-
-These are the expected trade-offs of fast static analysis; semantic resolution is the next step.
+- **Name-based resolution.** Calls are matched by function name, so a call to `send` links to *every* `send` in the repo. It doesn't yet resolve types/imports to pick the exact target — so the graph can over-report. (Semantic resolution is on the roadmap.)
+- **Dynamic dispatch isn't captured** — reflection, `getattr`, runtime-resolved calls are invisible to static analysis (formally undecidable in general).
+- **`search_code` is keyword/full-text**, not semantic — it matches words, so an intent phrased with entirely different vocabulary than the code may miss. (Vector search is a roadmap item, added only if keyword recall proves insufficient.)
 
 ---
 
 ## Roadmap
 
-- **Multi-language** extraction via **tree-sitter** / **Joern** (JavaScript, Java, and large legacy codebases)
-- **Semantic call resolution** (SCIP / LSP) to replace name-based matching
-- **Document onboarding** — ingest PRDs / Confluence / design docs alongside code
-- **Scoped-edit guardrail** — use the graph to constrain AI agents to minimal, traceable changes
+- **Semantic call resolution** (SCIP / LSP / CPG) to replace name-based matching — sharpens the blast-radius accuracy.
+- **Semantic search** (embeddings) layered over full-text for intent queries that don't share vocabulary with the code.
+- **Scoped-edit guardrail** — use the dependency graph to bound an AI agent's edits to the change's real perimeter, flagging anything out of scope (the "minimal, traceable edits" payoff).
+- **Document onboarding** — ingest PRDs / design docs alongside code so the agent reasons about intent, not just structure.
 
 ---
 

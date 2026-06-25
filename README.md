@@ -117,24 +117,28 @@ The pluggable parser interface means adding a language is one small backend clas
 
 ## Evaluation
 
-Retrieval quality is **measured, not asserted.** The `evals/` folder contains a labelled
-ground-truth set of intent → function pairs for `psf/requests`, split into two groups to make
-results *diagnostic*:
+Retrieval quality is **measured, not asserted.** The `evals/` folder holds a labelled ground-truth
+set for `psf/requests` and two complementary evals — an exact-match check for localization and an
+LLM-judged check for impact-analysis quality.
+
+### 1. Localization accuracy (exact-match)
+
+Intent → function pairs, split into two groups to make results *diagnostic*:
 
 - **Word-overlap** queries — the intent shares vocabulary with the code (e.g. *"merge settings"* → `merge_setting`). Tests whether keyword search *works*.
 - **Concept-only** queries — the intent uses different words than the code (e.g. *"retry against a server that asks for login"* → `handle_401`). Tests whether keyword search is *enough*.
 
-Measured top-3 localization accuracy of `search_code`:
+Measured top-3 accuracy of `search_code`:
 
 | Query type | Top-3 accuracy |
 |---|---|
 | Word-overlap | **83%** (10/12) |
 | Concept-only | **12%** (1/8) |
 
-This split drove a real engineering decision. The initial keyword ranking scored **50%** even on
-word-overlap queries — diagnosed (via the eval) as function *bodies* and *test files* polluting the
-ranking. Re-ranking in Cypher to boost name matches and exclude test files lifted word-overlap to
-**83%**; the two remaining misses are sibling ties (e.g. `merge_setting` vs `merge_environment_settings`),
+This split drove a real engineering decision. The initial ranking scored **50%** even on word-overlap
+queries — diagnosed (via the eval) as function *bodies* and *test files* polluting the ranking.
+Re-ranking in Cypher to boost name matches and exclude test files lifted word-overlap to **83%**;
+the two remaining misses are sibling ties (e.g. `merge_setting` vs `merge_environment_settings`),
 not failures.
 
 The **12%** on concept-only queries is the clean, isolated limitation of keyword search — every miss
@@ -142,9 +146,19 @@ is a case where the meaning matches but the words don't (*"character set"* vs `e
 *"asks for login"* vs `401`). That is precisely what a **hybrid semantic layer** addresses, which is
 why it's on the roadmap — justified by measurement, not assumed.
 
+### 2. Impact-analysis quality (LLM-judged)
+
+Because blast-radius output is fuzzy (there's no single correct string), `eval_impact.py` uses
+**DeepEval** with an **LLM-as-judge** metric (`GEval`, Claude as the grader): it scores whether
+`impact_of_change`'s output covers the dependent functions described in a hand-written reference
+for each case. This measures *quality of analysis*, which an exact-match check can't.
+
 ```bash
-# run the localization eval (exact-match, no API key needed)
+# 1. localization eval — exact-match, no API key needed
 python -m evals.eval_search
+
+# 2. impact-quality eval — LLM-judged (needs ANTHROPIC_API_KEY in .env)
+python -m evals.eval_impact
 ```
 
 ---

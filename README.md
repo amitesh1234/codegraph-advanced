@@ -115,6 +115,40 @@ The pluggable parser interface means adding a language is one small backend clas
 
 ---
 
+## Evaluation
+
+Retrieval quality is **measured, not asserted.** The `evals/` folder contains a labelled
+ground-truth set of intent → function pairs for `psf/requests`, split into two groups to make
+results *diagnostic*:
+
+- **Word-overlap** queries — the intent shares vocabulary with the code (e.g. *"merge settings"* → `merge_setting`). Tests whether keyword search *works*.
+- **Concept-only** queries — the intent uses different words than the code (e.g. *"retry against a server that asks for login"* → `handle_401`). Tests whether keyword search is *enough*.
+
+Measured top-3 localization accuracy of `search_code`:
+
+| Query type | Top-3 accuracy |
+|---|---|
+| Word-overlap | **83%** (10/12) |
+| Concept-only | **12%** (1/8) |
+
+This split drove a real engineering decision. The initial keyword ranking scored **50%** even on
+word-overlap queries — diagnosed (via the eval) as function *bodies* and *test files* polluting the
+ranking. Re-ranking in Cypher to boost name matches and exclude test files lifted word-overlap to
+**83%**; the two remaining misses are sibling ties (e.g. `merge_setting` vs `merge_environment_settings`),
+not failures.
+
+The **12%** on concept-only queries is the clean, isolated limitation of keyword search — every miss
+is a case where the meaning matches but the words don't (*"character set"* vs `encoding`,
+*"asks for login"* vs `401`). That is precisely what a **hybrid semantic layer** addresses, which is
+why it's on the roadmap — justified by measurement, not assumed.
+
+```bash
+# run the localization eval (exact-match, no API key needed)
+python -m evals.eval_search
+```
+
+---
+
 ## Tech stack
 
 - **Python** + **FastAPI** — service and REST layer
@@ -175,14 +209,14 @@ A **static, best-effort** call graph — honest about what it captures:
 
 - **Name-based resolution.** Calls are matched by function name, so a call to `send` links to *every* `send` in the repo. It doesn't yet resolve types/imports to pick the exact target — so the graph can over-report. (Semantic resolution is on the roadmap.)
 - **Dynamic dispatch isn't captured** — reflection, `getattr`, runtime-resolved calls are invisible to static analysis (formally undecidable in general).
-- **`search_code` is keyword/full-text**, not semantic — it matches words, so an intent phrased with entirely different vocabulary than the code may miss. (Vector search is a roadmap item, added only if keyword recall proves insufficient.)
+- **Keyword search has a measured ceiling.** `search_code` is full-text (with Cypher re-ranking), so it localizes vocabulary-overlap intents well (**83%**) but concept-only intents poorly (**12%**) — see [Evaluation](#evaluation). A hybrid semantic layer is the planned fix.
 
 ---
 
 ## Roadmap
 
-- **Semantic call resolution** (SCIP / LSP / CPG) to replace name-based matching — sharpens the blast-radius accuracy.
-- **Semantic search** (embeddings) layered over full-text for intent queries that don't share vocabulary with the code.
+- **Hybrid semantic search** (embeddings layered over full-text) for intent queries that don't share vocabulary with the code — directly targets the measured 12% concept-only gap.
+- **Semantic call resolution** (SCIP / LSP / CPG) to replace name-based matching — sharpens blast-radius accuracy.
 - **Scoped-edit guardrail** — use the dependency graph to bound an AI agent's edits to the change's real perimeter, flagging anything out of scope (the "minimal, traceable edits" payoff).
 - **Document onboarding** — ingest PRDs / design docs alongside code so the agent reasons about intent, not just structure.
 

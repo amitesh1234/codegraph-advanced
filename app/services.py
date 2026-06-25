@@ -18,13 +18,18 @@ def search_code(query: str, limit: int = 10) -> list:
     return run_query(
         "CALL db.index.fulltext.queryNodes('function_search', $query) "
         "YIELD node, score "
+        "WHERE NOT node.file CONTAINS 'test' "
+        "WITH node, score, toLower(node.name) AS lname, toLower($raw) AS q "
+        "WITH node, score, "
+        "     reduce(b = 0.0, w IN split(q, ' ') | "
+        "            b + CASE WHEN lname CONTAINS w THEN 10.0 ELSE 0.0 END) AS name_bonus "
         "RETURN node.id AS id, node.name AS name, node.file AS file, "
-        "node.line AS line, left(node.body, 200) AS snippet, score "
-        "ORDER BY score DESC "
+        "node.line AS line, left(node.body, 200) AS snippet, "
+        "score + name_bonus AS final_score "
+        "ORDER BY final_score DESC "
         "LIMIT $limit",
-        {"query": query, "limit": limit},
+        {"query": query, "raw": query, "limit": limit},
     )
-
 
 def get_function_source(function_id: str):
     rows = run_query(
